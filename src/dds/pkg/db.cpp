@@ -4,6 +4,7 @@
 #include <dds/error/errors.hpp>
 #include <dds/error/nonesuch.hpp>
 #include <dds/solve/solve.hpp>
+#include <dds/util/env.hpp>
 #include <dds/util/log.hpp>
 #include <dds/util/paths.hpp>
 
@@ -23,6 +24,12 @@ using namespace dds;
 
 namespace nsql = neo::sqlite3;
 using namespace neo::sqlite3::literals;
+
+namespace dds {
+
+void add_init_repo(nsql::database_ref db) noexcept;
+
+}  // namespace dds
 
 namespace {
 
@@ -82,7 +89,7 @@ void migrate_repodb_3(nsql::database& db) {
         CREATE TABLE dds_pkg_remotes (
             remote_id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
-            remote_url TEXT NOT NULL,
+            url TEXT NOT NULL,
             db_etag TEXT,
             db_mtime TEXT
         );
@@ -138,7 +145,7 @@ void migrate_repodb_3(nsql::database& db) {
 void do_store_pkg(neo::sqlite3::database&        db,
                   neo::sqlite3::statement_cache& st_cache,
                   const pkg_listing&             pkg) {
-    dds_log(debug, "Recording package {}@{}", pkg.ident.name, pkg.ident.version.to_string());
+    dds_log(debug, "Recording package {}@{}", pkg.ident.name.str, pkg.ident.version.to_string());
     auto& store_pkg_st = st_cache(R"(
         INSERT OR REPLACE INTO dds_pkgs
             (name, version, remote_url, description)
@@ -146,7 +153,7 @@ void do_store_pkg(neo::sqlite3::database&        db,
             (?, ?, ?, ?)
     )"_sql);
     nsql::exec(store_pkg_st,
-               pkg.ident.name,
+               pkg.ident.name.str,
                pkg.ident.version.to_string(),
                pkg.remote_pkg.to_url_string(),
                pkg.description);
@@ -170,7 +177,11 @@ void do_store_pkg(neo::sqlite3::database&        db,
         assert(dep.versions.num_intervals() == 1);
         auto iv_1 = *dep.versions.iter_intervals().begin();
         dds_log(trace, "  Depends on: {}", dep.to_string());
-        nsql::exec(new_dep_st, db_pkg_id, dep.name, iv_1.low.to_string(), iv_1.high.to_string());
+        nsql::exec(new_dep_st,
+                   db_pkg_id,
+                   dep.name.str,
+                   iv_1.low.to_string(),
+                   iv_1.high.to_string());
     }
 }
 
@@ -225,6 +236,13 @@ void ensure_migrated(nsql::database& db) {
     }
     meta["version"] = current_database_version;
     exec(db.prepare("UPDATE dds_cat_meta SET meta=?"), meta.dump());
+    tr.commit();
+
+    if (version < 3 && !getenv_bool("DDS_NO_ADD_INITIAL_REPO")) {
+        // Version 3 introduced remote repositories. If we're updating to 3, add that repo now
+        dds_log(info, "Downloading initial repository");
+        dds::add_init_repo(db);
+    }
 }
 
 }  // namespace
@@ -261,7 +279,7 @@ void pkg_db::store(const pkg_listing& pkg) {
 
 result<pkg_listing> pkg_db::get(const pkg_id& pk_id) const noexcept {
     auto ver_str = pk_id.version.to_string();
-    dds_log(trace, "Lookup package {}@{}", pk_id.name, ver_str);
+    dds_log(trace, "Lookup package {}@{}", pk_id.name.str, ver_str);
     auto& st = _stmt_cache(R"(
         SELECT
             pkg_id,
@@ -274,7 +292,7 @@ result<pkg_listing> pkg_db::get(const pkg_id& pk_id) const noexcept {
         ORDER BY pkg_id DESC
     )"_sql);
     st.reset();
-    st.bindings() = std::forward_as_tuple(pk_id.name, ver_str);
+    st.bindings() = std::forward_as_tuple(pk_id.name.str, ver_str);
     auto ec       = st.step(std::nothrow);
     if (ec == nsql::errc::done) {
         return new_error([&] {
@@ -303,7 +321,7 @@ result<pkg_listing> pkg_db::get(const pkg_id& pk_id) const noexcept {
     }
 
     neo_assert(invariant,
-               pk_id.name == name && pk_id.version == semver::version::parse(version),
+               pk_id.name.str == name && pk_id.version == semver::version::parse(version),
                "Package metadata does not match",
                pk_id.to_string(),
                name,
@@ -350,7 +368,7 @@ std::vector<pkg_id> pkg_db::by_name(std::string_view sv) const noexcept {
 }
 
 std::vector<dependency> pkg_db::dependencies_of(const pkg_id& pkg) const noexcept {
-    dds_log(trace, "Lookup dependencies of {}@{}", pkg.name, pkg.version.to_string());
+    dds_log(trace, "Lookup dependencies of {}", pkg.to_string());
     return nsql::exec_tuples<std::string,
                              std::string,
                              std::string>(  //
@@ -366,7 +384,7 @@ std::vector<dependency> pkg_db::dependencies_of(const pkg_id& pkg) const noexcep
                  WHERE pkg_id IN this_pkg_id
               ORDER BY dep_name
                 )"_sql),
-               pkg.name,
+               pkg.name.str,
                pkg.version.to_string())  //
         | neo::lref                      //
         | ranges::views::transform([](auto&& pair) {

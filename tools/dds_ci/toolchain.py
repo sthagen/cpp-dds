@@ -41,16 +41,14 @@ def get_default_audit_toolchain() -> Path:
     Get the default toolchain that should be used for dev and test based on the
     host platform.
     """
-    if distro.id() == 'alpine':
-        # Alpine Linux cannot use the full audit mode, as asan and ubsan do not
-        # work with musl
-        return paths.TOOLS_DIR / 'gcc-9-test.jsonc'
     if sys.platform == 'win32':
         return paths.TOOLS_DIR / 'msvc-audit.jsonc'
     if sys.platform == 'linux':
         return paths.TOOLS_DIR / 'gcc-9-audit.jsonc'
     if sys.platform == 'darwin':
         return paths.TOOLS_DIR / 'gcc-9-audit-macos.jsonc'
+    if sys.platform == 'freebsd11':
+        return paths.TOOLS_DIR / 'freebsd-gcc-10.jsonc'
     raise RuntimeError(f'Unable to determine the default toolchain (sys.platform is {sys.platform!r})')
 
 
@@ -63,6 +61,8 @@ def get_default_test_toolchain() -> Path:
         return paths.TESTS_DIR / 'msvc.tc.jsonc'
     if sys.platform in ('linux', 'darwin'):
         return paths.TESTS_DIR / 'gcc-9.tc.jsonc'
+    if sys.platform == 'freebsd11':
+        return paths.TOOLS_DIR / 'freebsd-gcc-10.jsonc'
     raise RuntimeError(f'Unable to determine the default toolchain (sys.platform is {sys.platform!r})')
 
 
@@ -77,4 +77,6 @@ def get_default_toolchain() -> Path:
         return paths.TOOLS_DIR / 'gcc-9-rel.jsonc'
     if sys.platform == 'darwin':
         return paths.TOOLS_DIR / 'gcc-9-rel-macos.jsonc'
+    if sys.platform == 'freebsd11':
+        return paths.TOOLS_DIR / 'freebsd-gcc-10.jsonc'
     raise RuntimeError(f'Unable to determine the default toolchain (sys.platform is {sys.platform!r})')

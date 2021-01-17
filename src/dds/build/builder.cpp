@@ -11,6 +11,7 @@
 #include <dds/util/time.hpp>
 
 #include <fansi/styled.hpp>
+#include <fmt/ostream.h>
 
 #include <array>
 #include <set>
@@ -128,11 +129,13 @@ library_plan prepare_library(state&                  st,
             }
         }
     }
-    return library_plan::create(lib, std::move(lp), pkg_man.namespace_ + "/" + lib.manifest().name);
+    return library_plan::create(lib,
+                                std::move(lp),
+                                pkg_man.namespace_.str + "/" + lib.manifest().name.str);
 }
 
 package_plan prepare_one(state& st, const sdist_target& sd) {
-    package_plan pkg{sd.sd.manifest.id.name, sd.sd.manifest.namespace_};
+    package_plan pkg{sd.sd.manifest.id.name.str, sd.sd.manifest.namespace_.str};
     auto         libs = collect_libraries(sd.sd.path);
     for (const auto& lib : libs) {
         pkg.add_library(prepare_library(st, sd, lib, sd.sd.manifest));
@@ -153,7 +156,7 @@ prepare_ureqs(const build_plan& plan, const toolchain& toolchain, path_ref out_r
     usage_requirement_map ureqs;
     for (const auto& pkg : plan.packages()) {
         for (const auto& lib : pkg.libraries()) {
-            auto& lib_reqs = ureqs.add(pkg.namespace_(), lib.name());
+            auto& lib_reqs = ureqs.add(pkg.namespace_(), lib.name().str);
             lib_reqs.include_paths.push_back(lib.library_().public_include_dir());
             lib_reqs.uses  = lib.library_().manifest().uses;
             lib_reqs.links = lib.library_().manifest().links;
@@ -173,7 +176,7 @@ void write_lml(build_env_ref env, const library_plan& lib, path_ref lml_path) {
     fs::create_directories(lml_path.parent_path());
     auto out = open(lml_path, std::ios::binary | std::ios::out);
     out << "Type: Library\n"
-        << "Name: " << lib.name() << '\n'
+        << "Name: " << lib.name().str << '\n'
         << "Include-Path: " << lib.library_().public_include_dir().generic_string() << '\n';
     for (auto&& use : lib.uses()) {
         out << "Uses: " << use.namespace_ << "/" << use.name << '\n';
@@ -195,7 +198,7 @@ void write_lmp(build_env_ref env, const package_plan& pkg, path_ref lmp_path) {
         << "Name: " << pkg.name() << '\n'
         << "Namespace: " << pkg.namespace_() << '\n';
     for (const auto& lib : pkg.libraries()) {
-        auto lml_path = lmp_path.parent_path() / pkg.namespace_() / (lib.name() + ".lml");
+        auto lml_path = lmp_path.parent_path() / pkg.namespace_() / (lib.name().str + ".lml");
         write_lml(env, lib, lml_path);
         out << "Library: " << lml_path.generic_string() << '\n';
     }
@@ -210,6 +213,95 @@ void write_lmi(build_env_ref env, const build_plan& plan, path_ref base_dir, pat
         write_lmp(env, pkg, lmp_path);
         out << "Package: " << pkg.name() << "; " << lmp_path.generic_string() << '\n';
     }
+}
+
+void write_lib_cmake(build_env_ref       env,
+                     std::ostream&       out,
+                     const package_plan& pkg,
+                     const library_plan& lib) {
+    fmt::print(out, "# Library {}/{}\n", pkg.namespace_(), lib.name().str);
+    auto cmake_name = fmt::format("{}::{}", pkg.namespace_(), lib.name().str);
+    auto cm_kind    = lib.archive_plan().has_value() ? "STATIC" : "INTERFACE";
+    fmt::print(
+        out,
+        "if(TARGET {0})\n"
+        "  get_target_property(dds_imported {0} dds_IMPORTED)\n"
+        "  if(NOT dds_imported)\n"
+        "    message(WARNING [[A target \"{0}\" is already defined, and not by a dds import]])\n"
+        "  endif()\n"
+        "else()\n",
+        cmake_name);
+    fmt::print(out,
+               "  add_library({0} {1} IMPORTED GLOBAL)\n"
+               "  set_property(TARGET {0} PROPERTY dds_IMPORTED TRUE)\n"
+               "  set_property(TARGET {0} PROPERTY INTERFACE_INCLUDE_DIRECTORIES [[{2}]])\n",
+               cmake_name,
+               cm_kind,
+               lib.library_().public_include_dir().generic_string());
+    for (auto&& use : lib.uses()) {
+        fmt::print(out,
+                   "  set_property(TARGET {} APPEND PROPERTY INTERFACE_LINK_LIBRARIES {}::{})\n",
+                   cmake_name,
+                   use.namespace_,
+                   use.name);
+    }
+    for (auto&& link : lib.links()) {
+        fmt::print(out,
+                   "  set_property(TARGET {} APPEND PROPERTY\n"
+                   "               INTERFACE_LINK_LIBRARIES $<LINK_ONLY:{}::{}>)\n",
+                   cmake_name,
+                   link.namespace_,
+                   link.name);
+    }
+    if (auto& arc = lib.archive_plan()) {
+        fmt::print(out,
+                   "  set_property(TARGET {} PROPERTY IMPORTED_LOCATION [[{}]])\n",
+                   cmake_name,
+                   (env.output_root / arc->calc_archive_file_path(env.toolchain)).generic_string());
+    }
+    fmt::print(out, "endif()\n");
+}
+
+void write_cmake_pkg(build_env_ref env, std::ostream& out, const package_plan& pkg) {
+    fmt::print(out, "## Imports for {}\n", pkg.name());
+    for (auto& lib : pkg.libraries()) {
+        write_lib_cmake(env, out, pkg, lib);
+    }
+    fmt::print(out, "\n");
+}
+
+void write_cmake(build_env_ref env, const build_plan& plan, path_ref cmake_out) {
+    fs::create_directories(fs::absolute(cmake_out).parent_path());
+    auto out = open(cmake_out, std::ios::binary | std::ios::out);
+    out << "## This CMake file was generated by `dds build-deps`. DO NOT EDIT!\n\n";
+    for (const auto& pkg : plan.packages()) {
+        write_cmake_pkg(env, out, pkg);
+    }
+}
+
+/**
+ * @brief Calculate a hash of the directory layout of the given directory.
+ *
+ * Because a tweaks-dir is specifically designed to have files added/removed within it, and
+ * its contents are inspected by `__has_include`, we need to have a way to invalidate any caches
+ * when the content of that directory changes. We don't care to hash the contents of the files,
+ * since those will already break any caches.
+ */
+std::string hash_tweaks_dir(const fs::path& tweaks_dir) {
+    if (!fs::is_directory(tweaks_dir)) {
+        return "0";  // No tweaks directory, no cache to bust
+    }
+    std::vector<fs::path> children{fs::recursive_directory_iterator{tweaks_dir},
+                                   fs::recursive_directory_iterator{}};
+    std::sort(children.begin(), children.end());
+    // A really simple inline djb2 hash
+    std::uint32_t hash = 5381;
+    for (auto& p : children) {
+        for (std::uint32_t c : fs::weakly_canonical(p).string()) {
+            hash = ((hash << 5) + hash) + c;
+        }
+    }
+    return std::to_string(hash);
 }
 
 template <typename Func>
@@ -227,10 +319,19 @@ void with_build_plan(const build_params&              params,
         params.out_root,
         db,
         toolchain_knobs{
-            .is_tty = stdout_is_a_tty(),
+            .is_tty     = stdout_is_a_tty(),
+            .tweaks_dir = params.tweaks_dir,
         },
         ureqs,
     };
+
+    if (env.knobs.tweaks_dir) {
+        env.knobs.cache_buster = hash_tweaks_dir(*env.knobs.tweaks_dir);
+        dds_log(trace,
+                "Build cache-buster value for tweaks-dir [{}] content is '{}'",
+                *env.knobs.tweaks_dir,
+                *env.knobs.cache_buster);
+    }
 
     if (st.generate_catch2_main) {
         auto catch_lib                  = prepare_test_driver(params, test_lib::catch_main, env);
@@ -285,6 +386,10 @@ void builder::build(const build_params& params) const {
 
         if (params.emit_lmi) {
             write_lmi(env, plan, params.out_root, *params.emit_lmi);
+        }
+
+        if (params.emit_cmake) {
+            write_cmake(env, plan, *params.emit_cmake);
         }
     });
 }

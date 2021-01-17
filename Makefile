@@ -28,7 +28,7 @@ docs-server: docs
 		python -m http.server 9794
 
 docs-watch: docs
-	+sh tools/docs-watch.sh
+	+poetry run sh tools/docs-watch.sh
 
 docs-sync-server:
 	mkdir -p _build/docs
@@ -86,6 +86,7 @@ vagrant-freebsd-ci:
 	vagrant up freebsd11
 	vagrant rsync
 	vagrant ssh freebsd11 -c '\
+		export PATH=$$PATH:$$HOME/.local/bin && \
 		cd /vagrant && \
 		make full-ci \
 		'
